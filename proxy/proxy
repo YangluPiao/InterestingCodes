@@ -2,67 +2,37 @@
 
 import socket
 import sys,os
-import select,threading,time,re
+import select,time,re
+from threading import Thread,current_thread
 
 
+class Forwarder(Thread):
+    def __init__(self,Cli_Sock,log_f,alpha,fake_ip,server_ip):
+        Thread.__init__(self)
+        self.send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.send_sock.bind((fake_ip,0))
+        self.send_sock.settimeout(None)
+        self.send_sock.connect((server_ip,80))
+        self.Cli_Sock=Cli_Sock
 
-class proxy(object):
-    def __init__(self, log_f,port=8000,alpha=0.5,fake_ip='1.0.0.1',server_ip='3.0.0.1'):
-        # Set proxy listening socket
-        self.Serv_Sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Close connection immediately after program ends
-        self.Serv_Sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        print 'Starting server ....'
-        self.Serv_Sock.bind(('', port))
-        self.Serv_Sock.listen(5)
-        self.Serv_Sock.settimeout(None)
         self.log_f=open(log_f,'w')
-        # Set parameters
-        self.BUFF_SIZE=1024
-        self.throughput=None
         self.alpha=alpha
-        self.fake_ip=fake_ip
         self.server_ip=server_ip
         # Set regex
         self.extract_reply=re.compile(r'GET.*HTTP/1\.1')
         self.extract_segment=re.compile(r'GET /vod/.*Seg.* HTTP/1\.1')
         self.content_length_re=re.compile(r'Content-Length: \d+')
-    def listen(self):
-        try:
-            while True:
-                # Start receiving data from the client
-                print 'ready to accept...'
-                Cli_Sock, Cli_addr = self.Serv_Sock.accept() # Accept a connection from client
-                print 'Connection received from: ', Cli_addr
-                # Use threads
-                t=threading.Thread(target=self.proxy2server,args=(Cli_Sock,))
-                t.daemon=True
-                t.start()
-                print 'current living thread: %d'%threading.activeCount() 
-        except KeyboardInterrupt:
-            # If ctrl-c is captured then close proxy server
-            print 'Closing server...'
-            self.Serv_Sock.close()
-            self.log_f.close()
-            sys.exit()
-    def init_send_socket(self):
-        # Initialize sending socket of proxy server
-        send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        send_sock.bind((self.fake_ip,0))
-        send_sock.settimeout(None)
-        send_sock.connect((self.server_ip,80))
-        return send_sock
-    def proxy2server(self,Cli_Sock):
-        send_sock = self.init_send_socket()
+
+        self.throughput=None 
+
+    def run(self):
         bitrate=0
         try:
-            # Possible input requests, one is for client(browser), the other one is for the server
-            input_list=[Cli_Sock,send_sock]
+            input_list=[self.Cli_Sock,self.send_sock]
             loop_enabled=True
             # Record timestamps at which transmission of a chunk starts and ends
             chunk_start=0
             chunk_end=0
-            this_is_new_thread=True
             # Find available bitrates of video chunks
             available=[]
             with open('/var/www/vod/big_buck_bunny.f4m','r') as f:
@@ -71,22 +41,18 @@ class proxy(object):
                     if len(found)>0:
                         available.append(int(re.findall(r'\d+',found[0])[0]))
             available.sort(key=int, reverse=True)
-            while loop_enabled:  
+            while loop_enabled:
                 inputready, outputready, exceptready = select.select(input_list,[],[])
                 for input_item in inputready:
-                    reply = input_item.recv(self.BUFF_SIZE)
-                    # If request is from client, forward to server
-                    if input_item==Cli_Sock:
-                        this_is_new_thread=False
+                    data = input_item.recv(1024)
+                    if input_item==self.Cli_Sock:
                         # Find big_buck_bunny.f4m in the header
-                        fake_bunny=len(re.findall(r'big\_buck\_bunny',reply))>0
-                        get_chunk=re.findall(self.extract_segment,reply)
+                        fake_bunny=len(re.findall(r'big\_buck\_bunny',data))>0
+                        get_chunk=re.findall(self.extract_segment,data)
                         if fake_bunny:
                             # If found, request big_buck_bunny_nolist.f4m instead
-                            make_up=(
-                                'GET /vod/big_buck_bunny_nolist.f4m HTTP/1.0\r\n\r\n'
-                                )
-                            send_sock.sendall(make_up)
+                            data=re.sub(r'big\_buck\_bunny','big_buck_bunny_nolist',data)
+                            # send_sock.sendall(make_up)
                         ## Choose appropriate bitrate for video chunks, if bandwidth is too small, just
                         #  choose the ones whose bitrate=10
                         elif len(get_chunk)>0:
@@ -94,7 +60,7 @@ class proxy(object):
                             make_up=re.sub(
                                 r'GET /vod/\d+Seg',
                                 'GET /vod/%sSeg'%(bitrate),
-                                reply
+                                data
                                 )
                             for rate in available:
                                 if self.throughput>=1.5*rate:
@@ -102,26 +68,37 @@ class proxy(object):
                                     make_up=re.sub(
                                         r'GET /vod/\d+Seg',
                                         'GET /vod/%sSeg'%(bitrate),
-                                        reply
+                                        data
                                         )
                                     break
                             chunk_end=time.time()
-                            send_sock.sendall(make_up)
-                            reply=make_up
-                        else:
-                            send_sock.sendall(reply)
+                            # send_sock.sendall(make_up)
+                            data=make_up
+                        # else:
+                        try:
+                            self.send_sock.sendall(data)
+                            # print current_thread()
+                        except Exception,e:
+                            loop_enabled=False
+                            print '1. ',current_thread()
+                            break
                         # Find all the 'GET' in requests
-                        result=re.findall(self.extract_reply,reply)
+                        result=re.findall(self.extract_reply,data)
                         # Send request to the server
-                        received=send_sock.recv(self.BUFF_SIZE)
+                        received=self.send_sock.recv(1024)
                         # Forward response from server to the client
-                        Cli_Sock.sendall(received)
+                        try:
+                            self.Cli_Sock.sendall(received)
+                        except Exception,e:
+                            loop_enabled=False
+                            print '2. ',current_thread()
+                            break
                         received=received[:200]
                         # If 'GET' is found
-                        if result is not None and len(result)>0:
+                        if len(result)>0:
                             #     print >>self.log_f, result[0]
                             # If 'GET' is requesting video chunks
-                            if self.extract_segment.match(reply) is not None:
+                            if self.extract_segment.match(data) is not None:
                                 curr_file=re.findall(r'\d+Seg.*Frag\d+',result[0])[0]
                                 content_length=re.findall(self.content_length_re, received)
                                 if len(content_length)>0:
@@ -135,35 +112,72 @@ class proxy(object):
                                     self.throughput=throughput_new
                                 else:
                                     self.throughput=self.alpha*(throughput_new)+(1-self.alpha)*self.throughput
-                                    print_msg='%.6f %f %d %d %d %s %s'%(time.time(),trans_time,throughput_new,self.throughput,bitrate,self.server_ip,curr_file)
+                                    print_msg='%.6f %f %d %d %d %s %s'\
+                                        %(time.time(),trans_time,throughput_new,self.throughput,bitrate,self.server_ip,curr_file)
                                     if chunk_start!=0:
                                         print print_msg
                                         print>>self.log_f,print_msg
                                 chunk_start=chunk_end
                         else:
                             # No more requests, jump out the loop and kill the thread
-                            print 'thread finished'
                             loop_enabled=False
-                    # Forward received data from server to the client
-                    elif input_item==send_sock and not this_is_new_thread:
-                        Cli_Sock.sendall(reply)
-                        this_is_new_thread=False
-        # Print exception message and its position
+                            print 'thread finished'
+                            break
+                    elif input_item==self.send_sock:
+                        # print 'from server'
+                        try:
+                            self.Cli_Sock.sendall(data)
+                            # print current_thread()
+                        except Exception,e:
+                            loop_enabled=False
+                            print '3. ',current_thread()
+                            break
+                        
+                # print "Received from dest: " + str(len(data))
+                # self.Cli_Sock.sendall(data)
         except Exception, e:
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print exc_type, fname, exc_tb.tb_lineno
-        # Close both sockets
-        send_sock.close()
-        Cli_Sock.close()
-    
-if __name__ == '__main__':
-    if len(sys.argv) < 6: 
+            _,_, exc_tb = sys.exc_info()
+            print e,exc_tb.tb_lineno
+
+        self.Cli_Sock.close()
+        self.send_sock.close()
+
+
+class Listener(object):
+    def __init__(self,log_f,alpha,listen_port,fake_ip,server_ip):
+        self.log_f=log_f
+        self.alpha=alpha
+        self.Serv_Sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.Serv_Sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.Serv_Sock.bind(('',listen_port))
+        self.Serv_Sock.listen(5)
+        self.fake_ip=fake_ip
+        self.server_ip=server_ip
+    def listen(self):
+        threads = []
+        try:
+            while True:
+                Cli_Sock,Cli_addr=self.Serv_Sock.accept()
+                Cli_Sock.settimeout(None)
+                print 'Connection received from: ', Cli_Sock,Cli_addr
+                proxy=Forwarder(Cli_Sock,self.log_f,self.alpha,self.fake_ip,self.server_ip)
+                proxy.daemon=True
+                proxy.start()
+                threads.append(proxy)
+                # time.sleep(0.01)
+            # for t in threads: 
+            #     t.join() 
+        except KeyboardInterrupt:
+            proxy.log_f.close()
+            self.Serv_Sock.close()
+            sys.exit(0)
+
+def main():
+    listener=Listener(sys.argv[1],float(sys.argv[2]),int(sys.argv[3]),sys.argv[4],sys.argv[5])
+    listener.listen()
+
+if __name__ == '__main__':   
+    if len(sys.argv) < 6:
         print 'Usage: \'proxy <log><alpha><listen-port><fake_ip><server_ip>\'\n'
         sys.exit(2)
-
-    my_proxy=proxy(log_f=sys.argv[1],alpha=float(sys.argv[2]),port=int(sys.argv[3]),fake_ip=sys.argv[4],server_ip=sys.argv[5])
-    my_proxy.listen()
-    
-
-    
+    main()
