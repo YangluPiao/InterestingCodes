@@ -14,7 +14,6 @@ class Forwarder(Thread):
         self.send_sock.settimeout(None)
         self.send_sock.connect((server_ip,80))
         self.Cli_Sock=Cli_Sock
-
         self.log_f=open(log_f,'w')
         self.alpha=alpha
         self.server_ip=server_ip
@@ -22,7 +21,7 @@ class Forwarder(Thread):
         self.extract_reply=re.compile(r'GET.*HTTP/1\.1')
         self.extract_segment=re.compile(r'GET /vod/.*Seg.* HTTP/1\.1')
         self.content_length_re=re.compile(r'Content-Length: \d+')
-
+        # EWMA average throughput
         self.throughput=None 
 
     def run(self):
@@ -72,12 +71,9 @@ class Forwarder(Thread):
                                         )
                                     break
                             chunk_end=time.time()
-                            # send_sock.sendall(make_up)
                             data=make_up
-                        # else:
                         try:
                             self.send_sock.sendall(data)
-                            # print current_thread()
                         except Exception,e:
                             loop_enabled=False
                             print '1. ',current_thread()
@@ -96,7 +92,6 @@ class Forwarder(Thread):
                         received=received[:200]
                         # If 'GET' is found
                         if len(result)>0:
-                            #     print >>self.log_f, result[0]
                             # If 'GET' is requesting video chunks
                             if self.extract_segment.match(data) is not None:
                                 curr_file=re.findall(r'\d+Seg.*Frag\d+',result[0])[0]
@@ -124,7 +119,6 @@ class Forwarder(Thread):
                             print 'thread finished'
                             break
                     elif input_item==self.send_sock:
-                        # print 'from server'
                         try:
                             self.Cli_Sock.sendall(data)
                             # print current_thread()
@@ -132,9 +126,6 @@ class Forwarder(Thread):
                             loop_enabled=False
                             print '3. ',current_thread()
                             break
-                        
-                # print "Received from dest: " + str(len(data))
-                # self.Cli_Sock.sendall(data)
         except Exception, e:
             _,_, exc_tb = sys.exc_info()
             print e,exc_tb.tb_lineno
@@ -164,9 +155,6 @@ class Listener(object):
                 proxy.daemon=True
                 proxy.start()
                 threads.append(proxy)
-                # time.sleep(0.01)
-            # for t in threads: 
-            #     t.join() 
         except KeyboardInterrupt:
             proxy.log_f.close()
             self.Serv_Sock.close()
@@ -178,6 +166,6 @@ def main():
 
 if __name__ == '__main__':   
     if len(sys.argv) < 6:
-        print 'Usage: \'proxy <log><alpha><listen-port><fake_ip><server_ip>\'\n'
+        print 'Usage: \'./proxy <log><alpha><listen-port><fake_ip><server_ip>\'\n'
         sys.exit(2)
     main()
